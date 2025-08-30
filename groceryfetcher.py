@@ -1,11 +1,27 @@
+from io import StringIO
 import traceback
 from playwright.sync_api import sync_playwright
-import json
-import time
 import psycopg2
 import pandas as pd
 from datetime import datetime
-import re
+from psycopg2.extras import execute_values
+import os
+from dotenv import load_dotenv
+import boto3
+
+load_dotenv()
+
+ACCESS_KEY = os.getenv("ACCESS_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+ENDPOINT = os.getenv("ENDPOINT")
+BUCKET = os.getenv("BUCKET")
+
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    endpoint_url=ENDPOINT
+)
 
 
 def scroll_and_scrape(page):
@@ -45,7 +61,7 @@ cursor.execute("SELECT category_id, category_name FROM category;")
 category_map = dict(cursor.fetchall())
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
+    browser = p.chromium.launch(headless=False)
     page = browser.new_page()
 
     all_rows = []
@@ -84,7 +100,8 @@ with sync_playwright() as p:
                 if data_set.empty:
                     continue
 
-                data_set['Date'] = datetime.now()
+              
+
                 data_set['category'] = cate_name
                 data_set['store_name'] = store_dict['store_name']
 
@@ -126,16 +143,12 @@ with sync_playwright() as p:
 
                 if 'unit' not in data_set.columns:
                     data_set['unit'] = None
+                
+                data_set['date'] = datetime.now()
 
-                filename = f"{store_dict['store_name']}_{cate_name}.json"
-                data_set.to_json(filename, orient="records",
-                                 force_ascii=False, indent=4)
-                print(f"Saved: {filename}")
+                data_set = data_set[~(data_set == "").any(axis=1)]
 
-                data_set = data_set.dropna()
-                rows = list(data_set[['name', 'price', 'category', 'Date',
-                            'store_name', 'unit']].itertuples(index=False, name=None))
-                all_rows.extend(rows)
+                all_rows.append(data_set)
 
             except Exception as e:
                 print(f"[ERROR] {url} -> {str(e)}")
@@ -143,27 +156,44 @@ with sync_playwright() as p:
                 continue
 
     browser.close()
-batch_size = 500  # adjust as needed (300–500 is safe on Supabase free tier)
 
 if all_rows:
-    insert_query_history = """
-        INSERT INTO products_history (name, price, category, date, store_name, unit)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """
+    combined_df = pd.concat(all_rows, ignore_index=True)
+else:
+    combined_df = pd.DataFrame(
+        columns=['name', 'price', 'category', 'store_name', 'unit', 'date'])
 
-    insert_query_daily = """
-        INSERT INTO daily_products (name, price, category, date, store_name, unit)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """
 
-    for i in range(1000, len(all_rows), batch_size):
-        batch = all_rows[i:i+batch_size]
+def insert_b2(data):
+    temp_b2_data = StringIO()
+    file_name = f"raw/file_{datetime.now().strftime('%Y-%m-%d')}.csv"
+    df = pd.DataFrame(data)
+    df.to_csv(temp_b2_data, index=False)
+    s3.put_object(Bucket=BUCKET, Key=file_name, Body=temp_b2_data.getvalue())
 
-        cursor.executemany(insert_query_history, batch)
-        cursor.executemany(insert_query_daily, batch)
-        conn.commit()
 
-        print(f"Inserted batch {i//batch_size + 1} with {len(batch)} rows")
+def bulk_insert(cursor, query, rows):
+    execute_values(cursor, query, rows, page_size=500)
+    conn.commit()
+
+
+insert_query_history = """
+    INSERT INTO products_history (name, price, category, store_name, unit, date)
+    VALUES %s
+"""
+insert_query_daily = """
+    INSERT INTO daily_products (name, price, category, store_name, unit, date)
+    VALUES %s
+"""
+# Upload CSV
+insert_b2(combined_df)
+
+# Bulk insert
+bulk_insert(cursor, insert_query_history, combined_df.values.tolist())
+bulk_insert(cursor, insert_query_daily, combined_df.values.tolist())
+
 
 cursor.close()
 conn.close()
+
+print("all data inserted successfully")

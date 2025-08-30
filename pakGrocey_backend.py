@@ -4,6 +4,8 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from fastapi import FastAPI
 from datetime import date  
 
+
+
 db_url = "postgresql://fareed:rYssJteYMh7UgxdeUk3Wmy0vq3wyXJmC@dpg-d29r4lqdbo4c739mbrb0-a.oregon-postgres.render.com:5432/pakGrocery"
 engine = create_engine(db_url, connect_args={"sslmode": "require"})
 LocalSession = sessionmaker(bind=engine)
