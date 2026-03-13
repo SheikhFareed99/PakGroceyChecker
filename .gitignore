@@ -1,1 +1,5 @@
 pakGroceryKey.pem
+.env
+__pycache__/
+*.pyc
+combined_data.csv
